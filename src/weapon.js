@@ -10,6 +10,11 @@ import { MuzzleFlash, LaserSight } from './effects.js';
 // The gun is semi-automatic: one round per press, and the press is ignored until the
 // cooldown has run out. Every control has a keyboard twin so the whole weapon can be
 // worked from a trackpad, where holding a right-click while steering is not possible.
+//
+// Reverse aim (F) mirrors the shot line through the camera without touching the view:
+// the character turns round and fires over its shoulder while you keep looking ahead.
+// Since a charged shot throws you away from the muzzle, that dashes you straight
+// forward — the whole point of the control.
 
 const RANGE = 220;
 const COOLDOWN = 0.36;          // seconds between shots
@@ -106,6 +111,10 @@ const SIGHT_Y = 0.115 * VIEW_SCALE;
 const HIP = { pos: new THREE.Vector3(0.16, -0.2, -0.58), rot: new THREE.Vector3(0.04, -0.09, 0.05) };
 const ADS = { pos: new THREE.Vector3(0, -SIGHT_Y, -0.46), rot: new THREE.Vector3(0, 0, 0) };
 const LOW = { pos: new THREE.Vector3(0.24, -0.44, -0.5), rot: new THREE.Vector3(-0.75, -0.45, 0.3) };
+// Reverse aim: pulled in to the shoulder and swung round, so the receiver stays in
+// frame on the right while the barrel sweeps out of it, pointing behind you. Kept far
+// enough out that no part of the gun crosses the view camera's near plane.
+const BACK = { pos: new THREE.Vector3(0.32, -0.2, -0.3), rot: new THREE.Vector3(0.06, -2.2, 0.25) };
 
 const _dir = new THREE.Vector3();
 const _right = new THREE.Vector3();
@@ -156,6 +165,8 @@ export class Weapon {
     this.chargeFlash = 0;
     this.baseSpread = 0.006;
     this.lowBlend = 0;
+    this.reversed = false;       // is the shot line flipped right now
+    this.backBlend = 0;          // smoothed, for the viewmodel swing
     this.recoil = 0;             // 0..1, drives every kick in the game
     this.recoilPitch = 0;        // radians added to the camera, recovers to zero
     this.recoilYaw = 0;
@@ -171,6 +182,13 @@ export class Weapon {
 
   get reloadProgress() { return this.reloading > 0 ? 1 - this.reloading / RELOAD_TIME : 1; }
 
+  // Where the barrel is actually pointed: down the view, or straight back out of it.
+  aimDir(camera, out) {
+    camera.getWorldDirection(out);
+    if (this.reversed) out.negate();
+    return out;
+  }
+
   beginReload() {
     if (this.reloading > 0 || this.ammo >= MAG_SIZE) return false;
     this.reloading = RELOAD_TIME;
@@ -181,7 +199,7 @@ export class Weapon {
 
   // --- firing ---------------------------------------------------------------
   fire(eye, camera, thirdPerson, player, charge = 0) {
-    camera.getWorldDirection(_dir);
+    this.aimDir(camera, _dir);
     _right.set(1, 0, 0).applyQuaternion(camera.quaternion);
     _up.set(0, 1, 0).applyQuaternion(camera.quaternion);
 
@@ -192,9 +210,12 @@ export class Weapon {
 
     // Trace from the eye so cover works, but aim along the crosshair ray so the shot
     // lands where the reticle sits even with the third-person camera slung behind.
-    let hit = traceShot(camera.position, _dir, RANGE, this.world);
+    // A reversed shot fires back past that camera, so there is no crosshair ray to
+    // match and it just leaves the head in the mirrored direction.
+    const origin = thirdPerson && this.reversed ? eye : camera.position;
+    let hit = traceShot(origin, _dir, RANGE, this.world);
     _aim.copy(hit.point);
-    if (thirdPerson) {
+    if (thirdPerson && !this.reversed) {
       _tmp.copy(_aim).sub(eye);
       const len = _tmp.length();
       if (len > 0.2) {
@@ -283,11 +304,18 @@ export class Weapon {
   update(dt, ctx) {
     const { input, player, camera, eye, thirdPerson } = ctx;
 
+    // Reverse aim: held on F, and the player carries it because the body turns to it.
+    // It is dropped during a slide, dive or roll, where the gun is stowed anyway.
+    this.reversed = input.isDown('KeyF') && !player.lowProfile;
+    player.backAim = this.reversed;
+    this.backBlend += ((this.reversed ? 1 : 0) - this.backBlend) * (1 - Math.exp(-13 * dt));
+
     // Aim: right mouse holds, Q toggles. The toggle is what makes this workable on a
     // trackpad, where you cannot hold a button and steer with the same hand.
     if (input.consumeTap('KeyQ')) this.adsToggle = !this.adsToggle;
     if (player.lowProfile) this.adsToggle = false;
-    const wantAds = (this.adsToggle || input.mouseDown(2)) && !player.lowProfile;
+    // There is nothing to line the sight up on behind you, so the sight is out.
+    const wantAds = (this.adsToggle || input.mouseDown(2)) && !player.lowProfile && !this.reversed;
     this.ads += ((wantAds ? 1 : 0) - this.ads) * (1 - Math.exp(-14 * dt));
 
     // Accuracy: standing still and aiming is tight, running and jumping is not.
@@ -363,14 +391,18 @@ export class Weapon {
     // Pick the rest pose: hip, aimed, or swung down out of the way for slides.
     const down = player.sliding || player.diving || player.rolling ? 1 : 0;
     this.lowBlend += (down - this.lowBlend) * (1 - Math.exp(-11 * dt));
-    const l = this.lowBlend, a = this.ads * (1 - l);
+    const l = this.lowBlend, b = this.backBlend * (1 - l), a = this.ads * (1 - l) * (1 - b);
 
-    const px = THREE.MathUtils.lerp(THREE.MathUtils.lerp(HIP.pos.x, ADS.pos.x, a), LOW.pos.x, l);
-    const py = THREE.MathUtils.lerp(THREE.MathUtils.lerp(HIP.pos.y, ADS.pos.y, a), LOW.pos.y, l);
-    const pz = THREE.MathUtils.lerp(THREE.MathUtils.lerp(HIP.pos.z, ADS.pos.z, a), LOW.pos.z, l);
-    const rx = THREE.MathUtils.lerp(THREE.MathUtils.lerp(HIP.rot.x, ADS.rot.x, a), LOW.rot.x, l);
-    const ry = THREE.MathUtils.lerp(THREE.MathUtils.lerp(HIP.rot.y, ADS.rot.y, a), LOW.rot.y, l);
-    const rz = THREE.MathUtils.lerp(THREE.MathUtils.lerp(HIP.rot.z, ADS.rot.z, a), LOW.rot.z, l);
+    // hip -> aimed -> swung behind -> stowed low, each blend layered over the last.
+    const stack = (hip, ads, back, low) =>
+      THREE.MathUtils.lerp(THREE.MathUtils.lerp(THREE.MathUtils.lerp(hip, ads, a), back, b), low, l);
+
+    const px = stack(HIP.pos.x, ADS.pos.x, BACK.pos.x, LOW.pos.x);
+    const py = stack(HIP.pos.y, ADS.pos.y, BACK.pos.y, LOW.pos.y);
+    const pz = stack(HIP.pos.z, ADS.pos.z, BACK.pos.z, LOW.pos.z);
+    const rx = stack(HIP.rot.x, ADS.rot.x, BACK.rot.x, LOW.rot.x);
+    const ry = stack(HIP.rot.y, ADS.rot.y, BACK.rot.y, LOW.rot.y);
+    const rz = stack(HIP.rot.z, ADS.rot.z, BACK.rot.z, LOW.rot.z);
 
     // Sway trails the mouse, bob follows the stride, both muted while aiming.
     const damp = 1 - this.ads * 0.75;
@@ -401,10 +433,13 @@ export class Weapon {
   updateLaser(camera, eye, thirdPerson, player) {
     if (thirdPerson) { this.laser.hide(); this.onTarget = false; return; }
 
-    camera.getWorldDirection(_dir);
+    this.aimDir(camera, _dir);
     const hit = traceShot(camera.position, _dir, RANGE, this.world);
     this.aimPoint.copy(hit.point);
+    // Still worth knowing a backward shot is lined up on a target, even though the
+    // beam itself is behind the camera and has nothing to draw on screen.
     this.onTarget = hit.kind === 'target';
+    if (this.reversed) { this.laser.hide(); return; }
 
     this.viewMuzzleWorld(camera, _origin);
     const strength = 1 - this.lowBlend * 0.85;

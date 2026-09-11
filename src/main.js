@@ -23,6 +23,11 @@ const chargeFill = chargeRing.querySelector('.fill');
 const ammoBox = document.getElementById('ammo');
 const ammoCount = document.getElementById('ammo-count');
 const ammoPips = document.getElementById('ammo-pips');
+const backAimTag = document.getElementById('backaim');
+const toast = document.getElementById('toast');
+const sensSlider = document.getElementById('sens');
+const sensValue = document.getElementById('sens-value');
+const sensReset = document.getElementById('sens-reset');
 const CHARGE_CIRCUMFERENCE = 2 * Math.PI * 27;
 
 const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, powerPreference: 'high-performance' });
@@ -55,6 +60,29 @@ const effects = new Effects(scene);
 
 world.targets = createTargets(scene, world.spawn);
 const weapon = new Weapon({ scene, viewScene, world, effects, character: player.character });
+
+// --- sensitivity ------------------------------------------------------------
+// The slider on the overlay and the [ / ] keys are two faces of the same setting, so
+// both go through Input and both get reflected back here.
+let toastTimer = 0;
+
+function showToast(html) {
+  toast.innerHTML = html;
+  toast.classList.add('on');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => toast.classList.remove('on'), 900);
+}
+
+sensSlider.min = input.sensRange.min;
+sensSlider.max = input.sensRange.max;
+input.onSensitivity = (scale, silent) => {
+  sensSlider.value = scale;
+  sensValue.textContent = `${scale.toFixed(2)}\u00d7`;
+  if (!silent) showToast(`sensitivity <b>${scale.toFixed(2)}\u00d7</b>`);
+};
+input.setSensitivity(input.sensScale, true);        // paint the stored value into the UI
+sensSlider.addEventListener('input', () => input.setSensitivity(sensSlider.value, true));
+sensReset.addEventListener('click', () => input.setSensitivity(1, true));
 
 let thirdPerson = false;
 let boom = 5.2;              // smoothed third-person camera distance
@@ -134,7 +162,9 @@ function updateCrosshair() {
   const px = Math.tan(weapon.baseSpread) / Math.tan(THREE.MathUtils.degToRad(camera.fov) / 2) * (innerHeight / 2);
   crosshair.style.setProperty('--gap', `${Math.max(3, px).toFixed(1)}px`);
   crosshair.classList.toggle('on-target', weapon.onTarget && !thirdPerson);
+  crosshair.classList.toggle('reversed', weapon.reversed);
   crosshair.classList.toggle('cooling', weapon.cooldown > 0 || weapon.reloading > 0);
+  backAimTag.classList.toggle('on', weapon.reversed);
   hitmarker.style.opacity = weapon.hitFlash;
   hitmarker.style.transform = `translate(-50%, -50%) scale(${1.35 - weapon.hitFlash * 0.3})`;
 
@@ -166,6 +196,10 @@ function frame(now) {
 
   const mouse = input.takeMouse();
   if (mouse.x || mouse.y) player.look(mouse.x, mouse.y);
+
+  // Sensitivity stays adjustable mid-game, in steps that feel even at both ends.
+  if (input.consumeTap('BracketLeft')) input.setSensitivity(input.sensScale / 1.1);
+  if (input.consumeTap('BracketRight')) input.setSensitivity(input.sensScale * 1.1);
 
   if (input.consumeTap('KeyV')) thirdPerson = !thirdPerson;
   if (input.consumeTap('Backspace')) {

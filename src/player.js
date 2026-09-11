@@ -68,6 +68,7 @@ export class Player {
     this.yaw = 0;            // looking down -Z, into the level
     this.pitch = 0;
     this.grounded = false;
+    this.backAim = false;    // firing over the shoulder: the body turns, the view does not
     this.sliding = false;
     this.diving = false;     // airborne slide
     this.rolling = false;    // the landing flip
@@ -355,8 +356,10 @@ export class Player {
   // sidesteps rather than the character turning away from its aim. Slides and dives
   // are the exception: those line up with travel, which is the whole look of them.
   #updateBodyYaw(dt) {
-    let target = this.yaw;
-    let rate = 16;
+    // Reverse aim spins the body a full half-turn while the camera keeps looking
+    // where it was: the character is genuinely shooting behind itself.
+    let target = this.backAim ? this.yaw + Math.PI : this.yaw;
+    let rate = this.backAim ? 13 : 16;
     if (this.lowProfile && this.speed > 0.9) {
       target = Math.atan2(-this.vel.x, -this.vel.z);
       rate = 8;
@@ -392,7 +395,8 @@ export class Player {
       z: p.z,
       feetY: p.y - this.half.y,
       bodyYaw: this.bodyYaw,
-      aimPitch: this.pitch,
+      // The backward shot line is the view mirrored, so the gun tips the other way.
+      aimPitch: this.backAim && !this.lowProfile ? -this.pitch : this.pitch,
       flip: this.bodyPitch,
       mode: this.mode,
       stateT: this.rolling ? this.rollT : this.stateT,

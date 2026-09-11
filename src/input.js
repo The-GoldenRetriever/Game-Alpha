@@ -1,9 +1,29 @@
 // Keyboard + pointer-lock mouse. Mouse deltas accumulate and are drained by the
 // renderer each frame so looking around never lags behind the display.
 //
+// Look speed is `SENS_BASE` scaled by a user multiplier that survives a reload, so a
+// sensitivity set once never has to be set again.
+//
 // Presses are latched as well as held: a trackpad tap can start and finish between
 // two frames, so `consumeClick` remembers the press rather than asking whether the
 // button happens to be down right now.
+
+// Radians of yaw per pixel of mouse travel at a scale of 1.
+const SENS_BASE = 0.0022;
+const SENS_MIN = 0.15;
+const SENS_MAX = 4;
+const SENS_KEY = 'game-alpha.sensitivity';
+
+const clamp = (v, lo, hi) => Math.min(Math.max(v, lo), hi);
+
+// Private mode and file:// URLs can both make storage throw rather than return null.
+function loadScale() {
+  try {
+    const v = parseFloat(localStorage.getItem(SENS_KEY));
+    return Number.isFinite(v) ? clamp(v, SENS_MIN, SENS_MAX) : 1;
+  } catch { return 1; }
+}
+
 export class Input {
   constructor(canvas, overlay) {
     this.canvas = canvas;
@@ -14,7 +34,9 @@ export class Input {
     this.clicked = new Set();
     this.mouseDX = 0;
     this.mouseDY = 0;
-    this.sensitivity = 0.0022;
+    this.sensScale = loadScale();
+    this.sensitivity = SENS_BASE * this.sensScale;
+    this.onSensitivity = null;    // set by the HUD so the slider and toast follow
     this.locked = false;
 
     window.addEventListener('keydown', (e) => {
@@ -35,7 +57,12 @@ export class Input {
       this.buttons.add(e.button);
       this.clicked.add(e.button);
     });
-    overlay.addEventListener('mousedown', lock);
+    // Anything marked `data-nolock` — the settings panel — is a real control, so a
+    // press there must not be swallowed as a request to start playing.
+    overlay.addEventListener('mousedown', (e) => {
+      if (e.target.closest('[data-nolock]')) return;
+      lock();
+    });
     canvas.addEventListener('contextmenu', (e) => e.preventDefault());
     overlay.addEventListener('contextmenu', (e) => e.preventDefault());
     window.addEventListener('mouseup', (e) => this.buttons.delete(e.button));
@@ -52,6 +79,17 @@ export class Input {
       this.mouseDY += e.movementY * this.sensitivity;
     });
   }
+
+  // Sensitivity as a multiplier, so the UI never has to know about radians per pixel.
+  setSensitivity(scale, silent = false) {
+    this.sensScale = clamp(Number(scale) || 1, SENS_MIN, SENS_MAX);
+    this.sensitivity = SENS_BASE * this.sensScale;
+    try { localStorage.setItem(SENS_KEY, String(this.sensScale)); } catch { /* storage is optional */ }
+    if (this.onSensitivity) this.onSensitivity(this.sensScale, silent);
+    return this.sensScale;
+  }
+
+  get sensRange() { return { min: SENS_MIN, max: SENS_MAX }; }
 
   isDown(code) { return this.down.has(code); }
   mouseDown(button) { return this.locked && this.buttons.has(button); }

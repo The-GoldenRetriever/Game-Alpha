@@ -18,6 +18,10 @@
     position: fixed; left: 50%; top: 50%; width: 0; height: 0; pointer-events: none;
   }
   #crosshair.on-target { --tint: #6cf0b8; }
+  /* Reverse aim: the reticle turns amber and tips into an X, so a backward shot line
+     never reads as a normal one. */
+  #crosshair.reversed { --tint: #ffb65a; transform: rotate(45deg); }
+  #crosshair.reversed .dot { opacity: .3; }
   #crosshair.cooling { --tint: #7c8896; }
   #crosshair.cooling i { opacity: .4; }
   #crosshair.cooling .dot { opacity: .18; }
@@ -82,6 +86,54 @@
   }
   #hud b { font-weight: 600; color: #7fd6cf; }
 
+  /* Reverse-aim banner, under the crosshair: the view still faces forward, so the
+     only cue that the gun is turned round is this. */
+  #backaim {
+    position: fixed; left: 50%; top: calc(50% + 34px); transform: translateX(-50%);
+    pointer-events: none; opacity: 0; transition: opacity .1s linear;
+    font-size: 11px; letter-spacing: .22em; text-transform: uppercase; color: #ffb65a;
+    text-shadow: 0 0 6px rgba(10, 16, 24, .9); white-space: nowrap;
+  }
+  #backaim.on { opacity: .95; }
+
+  /* Transient readout for sensitivity changes made mid-game with [ and ]. */
+  #toast {
+    position: fixed; left: 50%; top: 62%; transform: translateX(-50%);
+    pointer-events: none; opacity: 0; transition: opacity .25s ease;
+    letter-spacing: .08em; color: #e8eef5; text-shadow: 0 0 6px rgba(10, 16, 24, .9);
+  }
+  #toast.on { opacity: .95; transition-duration: .08s; }
+  #toast b { color: #7fd6cf; font-weight: 600; }
+
+  /* Settings, on the start overlay. Marked data-nolock so pressing the slider adjusts
+     it instead of being swallowed as "click to play". */
+  #settings {
+    display: grid; gap: 8px; justify-items: stretch; width: 320px; cursor: default;
+    padding: 12px 14px; border: 1px solid rgba(127, 214, 207, .22); border-radius: 6px;
+    background: rgba(16, 24, 35, .55);
+  }
+  #settings .row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+  #settings label { color: #7fd6cf; letter-spacing: .06em; text-transform: uppercase; font-size: 11px; }
+  #settings output { font-weight: 600; font-variant-numeric: tabular-nums; }
+  #settings .hint { opacity: .5; font-size: 11px; text-align: left; }
+  #sens {
+    -webkit-appearance: none; appearance: none; width: 100%; height: 4px; border-radius: 2px;
+    background: rgba(232, 238, 245, .18); outline: none; cursor: pointer;
+  }
+  #sens::-webkit-slider-thumb {
+    -webkit-appearance: none; appearance: none; width: 14px; height: 14px; border-radius: 50%;
+    background: #7fd6cf; border: none; cursor: pointer;
+  }
+  #sens::-moz-range-thumb {
+    width: 14px; height: 14px; border-radius: 50%; background: #7fd6cf; border: none; cursor: pointer;
+  }
+  #settings button {
+    justify-self: start; font: inherit; color: #cfdae6; cursor: pointer;
+    background: none; border: 1px solid rgba(207, 218, 230, .25); border-radius: 4px;
+    padding: 2px 8px; opacity: .8;
+  }
+  #settings button:hover { opacity: 1; border-color: rgba(127, 214, 207, .6); }
+
   #overlay {
     position: fixed; inset: 0; display: grid; place-content: center; gap: 18px;
     text-align: center; background: rgba(10, 16, 24, .82); backdrop-filter: blur(6px);
@@ -108,6 +160,8 @@
     <circle class="fill" cx="33" cy="33" r="27" stroke-dasharray="169.6" stroke-dashoffset="169.6"></circle>
   </svg>
   <div id="hitmarker"><i></i><i></i><i></i><i></i></div>
+  <div id="backaim">&#9668; reverse aim</div>
+  <div id="toast"></div>
   <div id="ammo">
     <div class="state">reloading</div>
     <div class="count"><b id="ammo-count">10</b><small> / <span id="ammo-max">10</span></small></div>
@@ -124,10 +178,24 @@
       <span>Mouse 1 / E</span><span>shoot — one round per press</span>
       <span>hold</span><span>charge a shot: dashes you the opposite way</span>
       <span>Mouse 2 / Q</span><span>aim down sight (Q toggles, for trackpads)</span>
+      <span>F</span><span>hold to aim behind you &mdash; charge and it dashes you forward</span>
       <span>R</span><span>reload</span>
       <span>V</span><span>first / third person</span>
       <span>Backspace</span><span>reset</span>
       <span>Esc</span><span>release mouse</span>
+      <span>[ / ]</span><span>sensitivity down / up, mid-game</span>
+    </div>
+
+    <div id="settings" data-nolock>
+      <div class="row">
+        <label for="sens">mouse sensitivity</label>
+        <output id="sens-value" for="sens">1.00&times;</output>
+      </div>
+      <input id="sens" type="range" min="0.15" max="4" step="0.05" value="1">
+      <div class="row">
+        <span class="hint">or press [ and ] while playing</span>
+        <button id="sens-reset" type="button">reset</button>
+      </div>
     </div>
     <p>aim at the floor and fire to launch yourself</p>
     <p>click to play</p>

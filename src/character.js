@@ -21,6 +21,25 @@ const TAU = Math.PI * 2;
 const clamp = THREE.MathUtils.clamp;
 const lerp = THREE.MathUtils.lerp;
 
+// Where the aiming eye sits, in body space. The weapon hangs off a pivot here, so
+// looking up and down swings the gun around the eye exactly the way a real sight line
+// does, and the head is then posed to meet it rather than the other way round.
+const EYE = new THREE.Vector3(0.05, 1.6, -0.1);
+const ARM_UPPER = RIG.upperArm;
+const ARM_LOWER = RIG.foreArm;          // the IK effector is the wrist
+const PALM = 0.05;                      // and the grip sits this far past it
+
+// Weapon carry poses, all relative to the eye pivot. `hold` is the gun's sight, so the
+// aimed pose is simply "sight straight out in front of the eye".
+const CARRY = {
+  aim:    { x: 0,     y: 0,     z: -0.26, pitch: 0,     yaw: 0,     roll: 0 },
+  ready:  { x: 0.09,  y: -0.22, z: -0.16, pitch: -0.22, yaw: -0.12, roll: 0.1 },
+  sprint: { x: 0.17,  y: -0.42, z: -0.08, pitch: -0.95, yaw: 0.45,  roll: 0.2 },
+  slide:  { x: 0.12,  y: -0.46, z: -0.22, pitch: -0.15, yaw: -0.35, roll: 0.45 },
+  dive:   { x: 0.04,  y: -0.3,  z: -0.42, pitch: 0.1,   yaw: 0,     roll: 0 },
+  roll:   { x: 0.12,  y: -0.34, z: -0.04, pitch: -0.6,  yaw: 0.3,   roll: 0.3 },
+};
+
 function makeMaterials() {
   return {
     suit: new THREE.MeshStandardMaterial({ color: 0xdfe6ed, roughness: 0.62, metalness: 0.06 }),
@@ -57,6 +76,89 @@ function ball(parent, radius, mat, x = 0, y = 0, z = 0) {
   return m;
 }
 
+// --- two-bone arm IK --------------------------------------------------------
+// Solves a shoulder/elbow chain so the hand lands on a point, which is what keeps
+// both hands welded to the weapon wherever the weapon happens to be.
+const DOWN = new THREE.Vector3(0, -1, 0);
+const _v = new THREE.Vector3();
+const _dir = new THREE.Vector3();
+const _axis = new THREE.Vector3();
+const _bendAxis = new THREE.Vector3();
+const _u = new THREE.Vector3();
+const _xa = new THREE.Vector3();
+const _cross = new THREE.Vector3();
+const _q1 = new THREE.Quaternion();
+const _q2 = new THREE.Quaternion();
+const _euler = new THREE.Euler(0, 0, 0, 'ZXY');
+const _ikTarget = new THREE.Vector3();
+const _ikAlt = new THREE.Vector3();
+const _magPos = new THREE.Vector3();
+const _eye = new THREE.Vector3();
+const _reach = new THREE.Vector3();
+const _span = new THREE.Vector3();
+const _slid = new THREE.Vector3();
+
+// How far along `from` -> `to` the hand has to slide before the shoulder can reach it.
+// Returns 0 when the original point is already in range.
+function reachFraction(shoulder, from, to) {
+  const R = ARM_UPPER + ARM_LOWER - 0.012;
+  _reach.copy(from).sub(shoulder);
+  if (_reach.lengthSq() <= R * R) return 0;
+  _span.copy(to).sub(from);
+  const a = _span.lengthSq();
+  if (a < 1e-8) return 1;
+  const b = 2 * _reach.dot(_span);
+  const c = _reach.lengthSq() - R * R;
+  const disc = b * b - 4 * a * c;
+  if (disc <= 0) return 1;
+  const t = (-b - Math.sqrt(disc)) / (2 * a);
+  return clamp(t, 0, 1);
+}
+const _ikOut = new THREE.Vector3();
+const _pole = new THREE.Vector3();
+const _gunQuat = new THREE.Quaternion();
+const _armQuat = new THREE.Quaternion();
+const _handQuat = new THREE.Quaternion();
+const _wrist = new THREE.Vector3();
+const _palm = new THREE.Vector3();
+// How each hand sits on the weapon. The firing hand wraps the pistol grip; the support
+// hand comes onto the handguard at an angle.
+const GRIP_R = new THREE.Quaternion().setFromEuler(new THREE.Euler(-0.2, 0, 0.1));
+const GRIP_L = new THREE.Quaternion().setFromEuler(new THREE.Euler(-0.6, 0, -0.2));
+
+// `target` and `shoulderPos` are both in the shoulder's parent space. `pole` is the
+// direction the elbow should break towards. Fills `out` with the shoulder's ZXY Euler
+// and returns the elbow bend.
+function solveArm(shoulderPos, target, pole, out) {
+  _v.copy(target).sub(shoulderPos);
+  let d = _v.length();
+  if (d < 1e-4) { _v.set(0, -0.1, 0); d = 0.1; }
+  _dir.copy(_v).divideScalar(d);
+
+  const A = ARM_UPPER, B = ARM_LOWER;
+  d = clamp(d, Math.abs(A - B) + 0.02, A + B - 0.008);
+  const bend = Math.PI - Math.acos(clamp((A * A + B * B - d * d) / (2 * A * B), -1, 1));
+  const alpha = Math.acos(clamp((A * A + d * d - B * B) / (2 * A * d), -1, 1));
+
+  // Swing the upper arm off the straight line, towards the pole.
+  _axis.crossVectors(_dir, pole);
+  if (_axis.lengthSq() < 1e-8) _axis.set(1, 0, 0); else _axis.normalize();
+  _u.copy(_dir).applyAxisAngle(_axis, -alpha);
+
+  _q1.setFromUnitVectors(DOWN, _u);
+  // Then twist about the upper arm so the elbow hinge lies in the bend plane.
+  _bendAxis.crossVectors(_u, _dir);
+  if (_bendAxis.lengthSq() < 1e-8) _bendAxis.copy(_axis); else _bendAxis.normalize();
+  _xa.set(1, 0, 0).applyQuaternion(_q1);
+  const phi = Math.atan2(_cross.crossVectors(_xa, _bendAxis).dot(_u), _xa.dot(_bendAxis));
+  _q2.setFromAxisAngle(_u, phi);
+  _q1.premultiply(_q2);
+
+  _euler.setFromQuaternion(_q1, 'ZXY');
+  out.set(_euler.x, _euler.y, _euler.z);
+  return bend;
+}
+
 function slab(parent, sx, sy, sz, mat, x = 0, y = 0, z = 0) {
   const m = new THREE.Mesh(new THREE.BoxGeometry(sx, sy, sz), mat);
   m.position.set(x, y, z);
@@ -71,6 +173,8 @@ const REST = {
   hipY: 0, hipPitch: 0, hipYaw: 0, hipRoll: 0,
   torsoPitch: 0, torsoYaw: 0, torsoRoll: 0,
   headPitch: 0, headYaw: 0, headRoll: 0,
+  holdX: CARRY.ready.x, holdY: CARRY.ready.y, holdZ: CARRY.ready.z,
+  holdPitch: CARRY.ready.pitch, holdYaw: CARRY.ready.yaw, holdRoll: CARRY.ready.roll,
   armLPitch: 0.05, armLSide: 0.09, armLTwist: 0, elbowL: 0.18,
   armRPitch: 0.05, armRSide: 0.09, armRTwist: 0, elbowR: 0.18,
   legLPitch: 0, legLSide: 0.015, kneeL: 0.04, ankleL: 0,
@@ -84,6 +188,7 @@ const RATE = {
   hipY: 16, hipPitch: 13, hipYaw: 16, hipRoll: 13,
   torsoPitch: 12, torsoYaw: 14, torsoRoll: 12,
   headPitch: 16, headYaw: 16, headRoll: 12,
+  holdX: 15, holdY: 15, holdZ: 15, holdPitch: 15, holdYaw: 15, holdRoll: 15,
   default: 19,
 };
 
@@ -176,7 +281,27 @@ export class Character {
     this.handL = this.arms[0].hand;
     this.handR = this.arms[1].hand;
 
+    // The weapon rides here, not in the hand: the hands are solved onto it instead.
+    this.aimPivot = joint(this.frame, EYE.x, EYE.y, EYE.z);
+    this.hold = joint(this.aimPivot, 0, 0, 0);
+    this.hold.rotation.order = 'YXZ';
+
     this.root.traverse((o) => { if (o.isMesh) { o.castShadow = true; o.receiveShadow = false; } });
+  }
+
+  // Hang a weapon off the aim pivot, lined up so its sight sits on the eye line.
+  attachWeapon(gun) {
+    this.gun = gun;
+    this.gunAnchors = {
+      grip: gun.getObjectByName('grip'),
+      foregrip: gun.getObjectByName('foregrip'),
+      magwell: gun.getObjectByName('magwell'),
+    };
+    const sight = gun.getObjectByName('sight');
+    gun.position.set(-sight.position.x, -sight.position.y, -sight.position.z);
+    gun.rotation.set(0, 0, 0);
+    this.hold.add(gun);
+    return gun;
   }
 
   setVisibleToCamera(visible) {
@@ -190,6 +315,11 @@ export class Character {
     const sp = s.speed;
     const gait = clamp(sp / 6.4, 0, 1.3);
     this.gait = gait;
+    // How much the support hand is on the gun: full while aiming, firing, charging or
+    // reloading, released at a sprint so the free arm can pump.
+    const sprint = clamp((sp - 3.6) / 3.2, 0, 1);
+    this.sprint = sprint;
+    this.grip = clamp(Math.max(s.aiming, s.fireHold, s.charge, s.reload >= 0 ? 1 : 0, 1 - sprint), 0, 1);
 
     // Cadence rises with speed; the cycle keeps running a moment after you stop so
     // the legs settle instead of freezing mid-stride.
@@ -208,9 +338,10 @@ export class Character {
 
     // The gun arm only tracks the camera while upright — slides and dives pose it
     // themselves.
-    const upright = s.mode === 'move' || s.mode === 'idle';
+    const upright = s.mode === 'move' || s.mode === 'idle' || s.mode === 'air';
     if (upright) this.poseAim(T, s);
-    const grounded = upright || s.mode === 'slide';
+    const grounded = s.mode === 'move' || s.mode === 'idle' || s.mode === 'slide';
+    this.poseCarry(T, s, upright);
 
     // Landing squat: a short dip in the hips right after touching down.
     if (s.landing > 0) {
@@ -222,10 +353,98 @@ export class Character {
     }
 
     // Lean into strafes and into hard camera turns.
-    T.rootRoll += clamp(s.strafe * 0.14 - s.turn * 0.1, -0.3, 0.3) * (grounded ? 1 : 0.5);
+    T.rootRoll += clamp(s.moveR * 0.16 - s.turn * 0.1, -0.3, 0.3) * (grounded ? 1 : 0.5);
 
     this.blend(dt);
     this.apply(s);
+
+    // Hands last: the weapon is placed off the finished body pose, then the arms are
+    // solved onto it, so both hands sit on the gun instead of near it.
+    this.root.updateMatrixWorld(true);
+    this.placeWeapon(s);
+    this.solveHands(s);
+  }
+
+  // Where the weapon is carried, and how tightly it is held. `grip` is how much the
+  // support hand is on the gun: full while aiming, firing, charging or reloading, and
+  // released at a sprint so the free arm can pump.
+  poseCarry(T, s, upright) {
+    const sprint = this.sprint;
+    const reloading = s.reload >= 0;
+
+    let pose = CARRY.ready;
+    if (s.mode === 'slide') pose = CARRY.slide;
+    else if (s.mode === 'dive') pose = CARRY.dive;
+    else if (s.mode === 'roll') pose = CARRY.roll;
+    else if (upright) {
+      // Blend ready -> aimed with ADS, and ready -> sprint carry with speed.
+      const a = s.aiming;
+      // The sprint carry only takes over when the support hand is actually free, so
+      // firing or aiming on the move brings the weapon straight back up.
+      const k = sprint * (1 - this.grip);
+      pose = {
+        x: lerp(lerp(CARRY.ready.x, CARRY.aim.x, a), CARRY.sprint.x, k),
+        y: lerp(lerp(CARRY.ready.y, CARRY.aim.y, a), CARRY.sprint.y, k),
+        z: lerp(lerp(CARRY.ready.z, CARRY.aim.z, a), CARRY.sprint.z, k),
+        pitch: lerp(lerp(CARRY.ready.pitch, CARRY.aim.pitch, a), CARRY.sprint.pitch, k),
+        yaw: lerp(lerp(CARRY.ready.yaw, CARRY.aim.yaw, a), CARRY.sprint.yaw, k),
+        roll: lerp(lerp(CARRY.ready.roll, CARRY.aim.roll, a), CARRY.sprint.roll, k),
+      };
+    }
+
+    T.holdX = pose.x; T.holdY = pose.y; T.holdZ = pose.z;
+    T.holdPitch = pose.pitch; T.holdYaw = pose.yaw; T.holdRoll = pose.roll;
+
+    // Reload: the gun comes inboard and tips up so the magazine well is reachable.
+    if (reloading) {
+      const swing = Math.sin(clamp(s.reload, 0, 1) * Math.PI);
+      T.holdX += 0.02 * swing;
+      T.holdY += -0.1 * swing;
+      T.holdZ += 0.07 * swing;
+      T.holdRoll += 0.75 * swing;
+      T.holdPitch += -0.15 * swing;
+    }
+
+    // Charging braces the weapon in tight against the shoulder.
+    if (s.charge > 0) {
+      T.holdZ += 0.03 * s.charge;
+      T.holdPitch += 0.04 * s.charge;
+    }
+
+    // Recoil throws the muzzle up and the weapon back into the shoulder.
+    const k = s.recoil * s.recoil;
+    T.holdZ += k * 0.06;
+    T.holdPitch += k * 0.32;
+    T.holdY += k * 0.015;
+  }
+
+  // Push the blended carry channels into the weapon's transform.
+  placeWeapon(s) {
+    const p = this.pose;
+    // While aiming, hang the sight line off the head's actual eye rather than a fixed
+    // point, so the sight stays lined up however far the neck has pitched.
+    _eye.set(0.045, 0.035, -0.1);
+    this.head.localToWorld(_eye);
+    this.frame.worldToLocal(_eye);
+    this.aimPivot.position.lerpVectors(EYE, _eye, s.aiming);
+
+    // The pivot carries the aim pitch: while aimed it is the full look angle, and it
+    // relaxes towards a loose follow when the gun is down.
+    this.aimPivot.rotation.x = s.aimPitch * lerp(0.35, 1, s.aiming);
+    this.hold.position.set(p.holdX, p.holdY, p.holdZ);
+    this.hold.rotation.set(p.holdPitch, p.holdYaw, p.holdRoll);
+
+    if (this.gun) {
+      const mag = this.gun.userData.magazine;
+      if (mag) {
+        // Drop the magazine out over the middle of the reload.
+        const r = s.reload;
+        const out = r < 0 ? 0 : clamp(Math.sin(clamp((r - 0.08) / 0.55, 0, 1) * Math.PI), 0, 1);
+        mag.position.y = -0.055 - out * 0.3;
+        mag.visible = out < 0.95;
+      }
+    }
+    this.aimPivot.updateMatrixWorld(true);
   }
 
   poseIdle(T, s) {
@@ -246,7 +465,11 @@ export class Character {
   poseRun(T, s, gait) {
     const p = this.phase;
     const sw = Math.sin(p), sw2 = Math.sin(p * 2);
-    const amp = 0.28 + gait * 0.30;              // thigh swing, each way
+    // The body faces wherever the gun is pointed, so the cycle has to cope with
+    // running sideways and backwards: `fwd` signs the stride, `side` turns it into a
+    // sidestep.
+    const fwd = s.moveF, side = s.moveR;
+    const amp = (0.28 + gait * 0.30) * fwd;      // negative when backpedalling
     const kneeAmp = 0.9 + gait * 0.95;
     // A leg is in swing while cos of its own phase is positive, so one knee folds up
     // while the other stays straight underneath the body.
@@ -263,7 +486,11 @@ export class Character {
     // ground instead of driving a toe or a heel through it.
     T.ankleL += -(thighL - kneeL) * 0.85;
     T.ankleR += -(thighR - kneeR) * 0.85;
-    T.legLSide += 0.02 * gait; T.legRSide += 0.02 * gait;
+    // Sidestep: both legs swing the same way in world space, alternating with the
+    // stride, plus a little permanent splay so the stance stays wide.
+    const step = side * 0.3 * sw;
+    T.legLSide += 0.02 * gait - step + Math.abs(side) * 0.05;
+    T.legRSide += 0.02 * gait + step + Math.abs(side) * 0.05;
 
     // The pelvis rides the straight stance leg: drop exactly as much as that leg
     // shortens when it swings away from vertical, and the planted foot never sinks
@@ -272,20 +499,20 @@ export class Character {
 
     // Hips counter-rotate against the shoulders, once per stride each way.
     T.hipY += sw2 * 0.012 * gait;
-    T.hipYaw += -0.14 * gait * sw;
+    T.hipYaw += -0.14 * gait * sw * fwd;
     T.hipRoll += 0.07 * gait * Math.cos(p);
-    T.torsoPitch += -(0.08 + gait * 0.26);
-    T.torsoYaw += 0.2 * gait * sw;
+    T.torsoPitch += -(0.08 + gait * 0.26) * fwd;   // leans back when backing up
+    T.torsoYaw += 0.2 * gait * sw * fwd;
     T.torsoRoll += -0.05 * gait * Math.cos(p);
-    T.headPitch += gait * 0.16 + sw2 * 0.02;   // chin up, so the run keeps its eyeline
-    T.headYaw += -0.1 * gait * sw;
+    T.headPitch += gait * 0.16 * fwd + sw2 * 0.02;
+    T.headYaw += -0.1 * gait * sw * fwd;
 
-    // Only the free arm pumps here; the gun arm is posed by poseAim, which adds its
-    // own much smaller ride on the stride.
-    const pump = 0.5 + gait * 0.75;
+    // The free arm only pumps when it is not on the weapon.
+    const free = 1 - this.grip;
+    const pump = (0.5 + gait * 0.75) * free;
     T.armLPitch += -amp * sw * pump * 1.4;
-    T.armLSide += 0.06 * gait;
-    T.elbowL += 0.5 + gait * 0.55 + Math.max(0, -sw) * 0.5;
+    T.armLSide += 0.06 * gait * free;
+    T.elbowL += (0.5 + gait * 0.55 + Math.max(0, -sw) * 0.5) * free;
   }
 
   poseAir(T, s) {
@@ -400,36 +627,107 @@ export class Character {
     T.armRPitch += 0.95 * tuck; T.armRSide += 0.3 * tuck; T.elbowR += 1.9 * tuck;
   }
 
-  // Shoulders and gun arm track where the camera is pointing. `w` swings the weapon
-  // from a low ready carry up into the shoulder.
+  // The upper body behind the gun. The arms themselves are solved onto the weapon
+  // afterwards, so this is about the spine, the shoulders and getting the eye behind
+  // the sight when aiming.
   poseAim(T, s) {
-    const w = Math.max(s.aiming, s.fire);
+    const w = s.aiming;
     const pitch = s.aimPitch;
-    const ride = Math.sin(this.phase) * 0.07 * this.gait;
 
-    T.armRPitch = lerp(0.24, -0.12 - pitch * 0.55, w) + ride;
-    T.armRSide = lerp(0.30, 0.80, w);
-    T.armRTwist = lerp(0.16, 0.32, w);
-    T.elbowR = lerp(1.08, 1.74, w) - ride * 0.5;
+    // Bladed towards the target, weight forward, head coming down onto the stock.
+    T.torsoYaw += lerp(-0.06, -0.26, w);
+    T.torsoPitch = lerp(T.torsoPitch, -0.16 + pitch * 0.35, w);
+    T.torsoRoll = lerp(T.torsoRoll, 0.05, w);
+    T.hipYaw += lerp(0, 0.1, w);
+    T.headPitch = lerp(T.headPitch, pitch * 0.7, w);  // eye runs down the sight line
+    T.headYaw = lerp(T.headYaw, -0.04, w);
+    T.headRoll = lerp(T.headRoll, 0.14, w);          // cheek onto the stock
+    T.rootY += -0.05 * w;                            // settle into the stance
+    T.kneeL += 0.12 * w; T.kneeR += 0.12 * w;
 
-    // The left hand comes across onto the foregrip only once you are actually aiming.
-    T.armLPitch = lerp(T.armLPitch, 0.66 - pitch * 0.45, w);
-    T.armLSide = lerp(T.armLSide, -0.26, w);
-    T.armLTwist = lerp(T.armLTwist, -0.38, w);
-    T.elbowL = lerp(T.elbowL, 1.58, w);
+    // Charging braces the whole body back against the wind-up.
+    const c = s.charge;
+    T.torsoPitch += c * 0.1;
+    T.rootY += -0.03 * c;
+    T.headPitch += -c * 0.06;
 
-    T.torsoYaw += lerp(-0.1, -0.34, w);
-    T.torsoPitch = lerp(T.torsoPitch, -0.12 + pitch * 0.25, w);
-    T.torsoRoll = lerp(T.torsoRoll, 0.06, w);
-    T.headPitch = lerp(T.headPitch, pitch * 0.5, w);
-    T.headYaw = lerp(T.headYaw, 0.2, w);
+    // Reload: eyes flick down to the magazine well.
+    if (s.reload >= 0) {
+      const swing = Math.sin(clamp(s.reload, 0, 1) * Math.PI);
+      T.headPitch += -0.3 * swing;
+      T.headYaw += 0.12 * swing;
+      T.torsoPitch += -0.08 * swing;
+    }
 
     // Recoil: the whole upper body absorbs the kick.
     const k = s.recoil;
-    T.armRPitch += -k * 0.3; T.elbowR += k * 0.42;
-    T.armLPitch += -k * 0.2; T.elbowL += k * 0.26;
-    T.torsoPitch += -k * 0.16;
-    T.headPitch += k * 0.12;
+    T.torsoPitch += k * 0.18;
+    T.headPitch += k * 0.14;
+    T.rootY += -k * 0.02;
+  }
+
+  // Solve both arms onto the weapon. The firing hand is always on the grip; the
+  // support hand blends between the gun and whatever the body pose wanted.
+  solveHands(s) {
+    if (!this.gun) return;
+    const p = this.pose;
+    const [armL, armR] = this.arms;
+    this.gun.getWorldQuaternion(_gunQuat);
+
+    // The hand grips the weapon a palm's width past the wrist, so the chain is solved
+    // to the wrist that puts the palm on the anchor with the hand already turned to
+    // match the gun.
+    const wristFor = (anchorPos, gripOffset) => {
+      _handQuat.copy(_gunQuat).multiply(gripOffset);
+      _palm.set(0, PALM, 0).applyQuaternion(_handQuat);
+      _wrist.copy(anchorPos).add(_palm);
+      return this.torso.worldToLocal(_wrist);
+    };
+    const setWrist = (arm, gripOffset, w) => {
+      if (w <= 0.001) { arm.hand.quaternion.identity(); return; }
+      arm.elbow.updateMatrixWorld(true);
+      arm.elbow.getWorldQuaternion(_armQuat);
+      _handQuat.copy(_armQuat).invert().multiply(_gunQuat).multiply(gripOffset);
+      arm.hand.quaternion.identity().slerp(_handQuat, w);
+    };
+
+    // Firing hand, always on the pistol grip.
+    this.gunAnchors.grip.getWorldPosition(_ikAlt);
+    _ikTarget.copy(wristFor(_ikAlt, GRIP_R));
+    const bendR = solveArm(armR.shoulder.position, _ikTarget, _pole.set(0.85, -0.55, 0.35), _ikOut);
+    p.armRPitch = _ikOut.x; p.armRTwist = -_ikOut.y; p.armRSide = _ikOut.z;
+    p.elbowR = bendR;
+
+    // Support hand: the handguard normally, the magazine well mid-reload.
+    this.gunAnchors.foregrip.getWorldPosition(_ikAlt);
+    if (s.reload >= 0) {
+      const r = clamp(s.reload, 0, 1);
+      const swap = Math.sin(clamp((r - 0.05) / 0.75, 0, 1) * Math.PI);
+      this.gunAnchors.magwell.getWorldPosition(_magPos);
+      _magPos.y -= 0.14 * (1 - swap);          // dips to the pouch before coming up
+      _ikAlt.lerp(_magPos, swap);
+    }
+    _ikTarget.copy(wristFor(_ikAlt, GRIP_L));
+    // If the pose has thrown the weapon out of the support arm's reach, slide that
+    // hand back down the handguard towards the grip instead of letting it float.
+    this.gunAnchors.grip.getWorldPosition(_magPos);
+    _slid.copy(wristFor(_magPos, GRIP_L));
+    const t = reachFraction(armL.shoulder.position, _ikTarget, _slid);
+    if (t > 0) _ikTarget.lerp(_slid, t);
+    const bendL = solveArm(armL.shoulder.position, _ikTarget, _pole.set(-0.55, -1, 0.15), _ikOut);
+    const g = this.grip;
+    p.armLPitch = lerp(p.armLPitch, _ikOut.x, g);
+    p.armLTwist = lerp(p.armLTwist, _ikOut.y, g);
+    p.armLSide = lerp(p.armLSide, -_ikOut.z, g);
+    p.elbowL = lerp(p.elbowL, bendL, g);
+
+    armL.shoulder.rotation.set(p.armLPitch, p.armLTwist, -p.armLSide);
+    armL.elbow.rotation.x = p.elbowL;
+    armR.shoulder.rotation.set(p.armRPitch, -p.armRTwist, p.armRSide);
+    armR.elbow.rotation.x = p.elbowR;
+
+    setWrist(armR, GRIP_R, 1);
+    setWrist(armL, GRIP_L, g);
   }
 
   blend(dt) {

@@ -34,6 +34,12 @@ export const TUNING = {
   rollFriction: 1.7,
   rollTurnRate: 1.6,
 
+  backSpeedScale: 0.72,     // backpedalling is slower than running forward
+  adsSpeedScale: 0.45,      // and aiming down the sight slower still
+  dashCeiling: 15,          // upward limit on a charged-shot dash
+  dashTime: 0.42,           // window where a dash keeps its speed
+  dashFriction: 0.1,
+
   coyoteTime: 0.12,
   jumpBuffer: 0.15,
 };
@@ -85,7 +91,10 @@ export class Player {
     this.lastYaw = 0;
     this.turnRate = 0;
     this.strafe = 0;
-    this.aiming = 0;
+    this.aiming = 0;         // the weapon's smoothed ADS weight, set from outside
+    this.moveF = 0;          // travel direction in body space, for the leg cycle
+    this.moveR = 0;
+    this.dashTimer = 0;
 
     this.character = new Character();
     this.mesh = this.character.root;
@@ -144,6 +153,21 @@ export class Player {
   // Public so a recoil launch can pop you out of a slide as it throws you.
   standUp(cooldown = TUNING.slideCooldown) { return this.#standUp(cooldown); }
 
+  // A charged shot throws the player the opposite way. Horizontal impulses stack onto
+  // whatever speed is already there; upward ones are capped so they cannot be chained
+  // into orbit. The dash window afterwards holds the speed instead of scrubbing it.
+  dash(vx, vy, vz) {
+    const T = TUNING;
+    this.vel.x += vx;
+    this.vel.z += vz;
+    if (vy > 0) this.vel.y = Math.min(Math.max(this.vel.y, -3) + vy, T.dashCeiling);
+    else this.vel.y = Math.max(this.vel.y + vy, -T.maxFallSpeed);
+    this.grounded = false;
+    this.coyote = 0;
+    this.dashTimer = T.dashTime;
+    if (this.lowProfile) this.#standUp(0);
+  }
+
   #standUp(cooldown = TUNING.slideCooldown) {
     if (!this.#canStand()) return false;
     this.sliding = this.diving = this.rolling = false;
@@ -196,13 +220,21 @@ export class Player {
     const wishing = wish.lengthSq() > 0;
     if (wishing) wish.normalize();
     this.strafe = r;
-    this.aiming = input.mouseDown(2) ? 1 : 0;
+
+    // Aiming and backpedalling both slow you down. Acceleration is scaled back up by
+    // the same amount: otherwise a low top speed leaves ground friction — which has a
+    // floor of `stopSpeed` — strong enough to cancel the acceleration entirely.
+    let wishSpeed = T.walkSpeed;
+    if (f < 0) wishSpeed *= T.backSpeedScale;
+    wishSpeed *= 1 - this.aiming * (1 - T.adsSpeedScale);
+    const accelScale = T.walkSpeed / wishSpeed;
 
     // --- timers ---------------------------------------------------------------
     this.coyote = this.grounded ? T.coyoteTime : Math.max(0, this.coyote - dt);
     this.buffer = input.consumeTap('Space') ? T.jumpBuffer : Math.max(0, this.buffer - dt);
     this.cooldown = Math.max(0, this.cooldown - dt);
     this.landing = Math.max(0, this.landing - dt * 4.2);
+    this.dashTimer = Math.max(0, this.dashTimer - dt);
 
     // --- slide / dive ----------------------------------------------------------
     const slideHeld = input.anyDown('ShiftLeft', 'ShiftRight', 'ControlLeft', 'KeyC');
@@ -263,10 +295,10 @@ export class Player {
         if (!this.grounded) this.#accelerate(wish, T.walkSpeed, T.airAccel, dt);
       }
     } else if (this.grounded) {
-      this.#applyFriction(dt, T.friction);
-      if (wishing) this.#accelerate(wish, T.walkSpeed, T.groundAccel, dt);
+      this.#applyFriction(dt, this.dashTimer > 0 ? T.friction * T.dashFriction : T.friction);
+      if (wishing) this.#accelerate(wish, wishSpeed, T.groundAccel * accelScale, dt);
     } else if (wishing) {
-      this.#accelerate(wish, T.walkSpeed, T.airAccel, dt);
+      this.#accelerate(wish, wishSpeed, T.airAccel * accelScale, dt);
     }
 
     // --- jump ------------------------------------------------------------------
@@ -319,21 +351,29 @@ export class Player {
     this.stateT += dt;
   }
 
-  // Which way the body itself faces: the camera while aiming or standing, the
-  // direction of travel while running, sliding or diving.
+  // The body faces wherever the gun is pointed, so strafing and backpedalling read as
+  // sidesteps rather than the character turning away from its aim. Slides and dives
+  // are the exception: those line up with travel, which is the whole look of them.
   #updateBodyYaw(dt) {
     let target = this.yaw;
-    let rate = 13;
-    const travelling = this.speed > 0.9;
-    if (this.lowProfile && travelling) {
+    let rate = 16;
+    if (this.lowProfile && this.speed > 0.9) {
       target = Math.atan2(-this.vel.x, -this.vel.z);
       rate = 8;
-    } else if (travelling && !this.aiming && this.speed > 1.6) {
-      target = Math.atan2(-this.vel.x, -this.vel.z);
-      rate = 10;
     }
     this.bodyYaw += wrapPi(target - this.bodyYaw) * (1 - Math.exp(-rate * dt));
     this.bodyYaw = wrapPi(this.bodyYaw);
+
+    // Travel direction in body space: +F is forward, +R is to the character's right.
+    const sin = Math.sin(this.bodyYaw), cos = Math.cos(this.bodyYaw);
+    const sp = this.speed;
+    if (sp > 0.2) {
+      this.moveF = (this.vel.x * -sin + this.vel.z * -cos) / sp;
+      this.moveR = (this.vel.x * cos + this.vel.z * -sin) / sp;
+    } else {
+      this.moveF += (0 - this.moveF) * (1 - Math.exp(-8 * dt));
+      this.moveR += (0 - this.moveR) * (1 - Math.exp(-8 * dt));
+    }
   }
 
   // Called once per rendered frame; `alpha` blends the last two fixed steps.
@@ -363,9 +403,14 @@ export class Player {
       landing: this.landing,
       strafe: this.strafe,
       turn: this.turnRate,
+      moveF: this.moveF,
+      moveR: this.moveR,
       aiming: weapon ? weapon.ads : 0,
       fire: weapon ? Math.min(1, weapon.recoil * 2) : 0,
+      fireHold: weapon ? weapon.fireHold : 0,
       recoil: weapon ? weapon.recoil : 0,
+      charge: weapon ? weapon.charge : 0,
+      reload: weapon && weapon.reloading > 0 ? weapon.reloadProgress : -1,
     });
 
     return p;

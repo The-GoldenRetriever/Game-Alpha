@@ -33,6 +33,36 @@
   #crosshair .left { transform: translateX(calc(-1 * var(--gap) - 7px)); }
   #crosshair .right { transform: translateX(var(--gap)); }
 
+  /* Charge ring: only appears once the wind-up has actually started, so a normal
+     press never shows it. */
+  #charge {
+    position: fixed; left: 50%; top: 50%; width: 66px; height: 66px;
+    transform: translate(-50%, -50%) rotate(-90deg);
+    opacity: 0; pointer-events: none; transition: opacity .12s linear;
+  }
+  #charge circle { fill: none; stroke-linecap: round; }
+  #charge .track { stroke: rgba(10, 16, 24, .55); stroke-width: 4; }
+  #charge .fill { stroke: #ffb65a; stroke-width: 3; transition: stroke .1s linear; }
+  #charge.full .fill { stroke: #8affd0; }
+  #charge.full { animation: chargePulse .5s ease-in-out infinite alternate; }
+  @keyframes chargePulse { from { opacity: .85; } to { opacity: 1; } }
+
+  /* Ammo, bottom right: a readout plus one pip per round left in the magazine. */
+  #ammo {
+    position: fixed; right: 18px; bottom: 14px; pointer-events: none;
+    display: grid; justify-items: end; gap: 6px; opacity: .9;
+  }
+  #ammo .count { font-size: 21px; font-weight: 600; letter-spacing: .06em; color: #e8eef5; }
+  #ammo .count small { font-size: 12px; opacity: .5; font-weight: 400; }
+  #ammo .pips { display: flex; gap: 3px; }
+  #ammo .pips i { width: 5px; height: 13px; border-radius: 1px; background: #7fd6cf; opacity: .9; }
+  #ammo .pips i.spent { background: #e8eef5; opacity: .16; }
+  #ammo.low .count, #ammo.low .pips i { color: #ff8f6f; background-color: #ff8f6f; }
+  #ammo.low .count { background: none; }
+  #ammo .state { font-size: 11px; letter-spacing: .14em; text-transform: uppercase; color: #ffb65a; opacity: 0; }
+  #ammo.reloading .state { opacity: .95; }
+  #ammo.reloading .pips i { background: #ffb65a; opacity: .22; }
+
   /* Hit marker: four ticks that pop when a target takes a round. */
   #hitmarker {
     position: fixed; left: 50%; top: 50%; width: 26px; height: 26px;
@@ -73,7 +103,16 @@
     <i class="dot"></i>
     <i class="v up"></i><i class="v down"></i><i class="h left"></i><i class="h right"></i>
   </div>
+  <svg id="charge" viewBox="0 0 66 66" aria-hidden="true">
+    <circle class="track" cx="33" cy="33" r="27"></circle>
+    <circle class="fill" cx="33" cy="33" r="27" stroke-dasharray="169.6" stroke-dashoffset="169.6"></circle>
+  </svg>
   <div id="hitmarker"><i></i><i></i><i></i><i></i></div>
+  <div id="ammo">
+    <div class="state">reloading</div>
+    <div class="count"><b id="ammo-count">10</b><small> / <span id="ammo-max">10</span></small></div>
+    <div class="pips" id="ammo-pips"></div>
+  </div>
   <div id="hud">speed <b id="speed">0.0</b> · view <b id="view">first</b> · targets <b id="hits">0</b></div>
 
   <div id="overlay">
@@ -83,9 +122,11 @@
       <span>Space</span><span>jump</span>
       <span>Shift</span><span>slide — in the air it becomes a dive</span>
       <span>Mouse 1 / E</span><span>shoot — one round per press</span>
+      <span>hold</span><span>charge a shot: dashes you the opposite way</span>
       <span>Mouse 2 / Q</span><span>aim down sight (Q toggles, for trackpads)</span>
+      <span>R</span><span>reload</span>
       <span>V</span><span>first / third person</span>
-      <span>R</span><span>reset</span>
+      <span>Backspace</span><span>reset</span>
       <span>Esc</span><span>release mouse</span>
     </div>
     <p>aim at the floor and fire to launch yourself</p>

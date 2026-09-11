@@ -18,6 +18,12 @@ const hudView = document.getElementById('view');
 const hudHits = document.getElementById('hits');
 const crosshair = document.getElementById('crosshair');
 const hitmarker = document.getElementById('hitmarker');
+const chargeRing = document.getElementById('charge');
+const chargeFill = chargeRing.querySelector('.fill');
+const ammoBox = document.getElementById('ammo');
+const ammoCount = document.getElementById('ammo-count');
+const ammoPips = document.getElementById('ammo-pips');
+const CHARGE_CIRCUMFERENCE = 2 * Math.PI * 27;
 
 const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, powerPreference: 'high-performance' });
 renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
@@ -58,6 +64,10 @@ const camTarget = new THREE.Vector3();
 const lookDir = new THREE.Vector3();
 const boomDir = new THREE.Vector3();
 let camRoll = 0;
+
+document.getElementById('ammo-max').textContent = weapon.magSize;
+for (let i = 0; i < weapon.magSize; i++) ammoPips.appendChild(document.createElement('i'));
+const pips = [...ammoPips.children];
 
 function resize() {
   const w = innerWidth, h = innerHeight;
@@ -124,9 +134,26 @@ function updateCrosshair() {
   const px = Math.tan(weapon.baseSpread) / Math.tan(THREE.MathUtils.degToRad(camera.fov) / 2) * (innerHeight / 2);
   crosshair.style.setProperty('--gap', `${Math.max(3, px).toFixed(1)}px`);
   crosshair.classList.toggle('on-target', weapon.onTarget && !thirdPerson);
-  crosshair.classList.toggle('cooling', weapon.cooldown > 0);
+  crosshair.classList.toggle('cooling', weapon.cooldown > 0 || weapon.reloading > 0);
   hitmarker.style.opacity = weapon.hitFlash;
   hitmarker.style.transform = `translate(-50%, -50%) scale(${1.35 - weapon.hitFlash * 0.3})`;
+
+  // Charge ring. It is only ever visible once the wind-up has started, which is well
+  // after a normal shot has gone.
+  const c = weapon.charge;
+  chargeRing.style.opacity = c > 0 ? 1 : 0;
+  chargeFill.style.strokeDashoffset = CHARGE_CIRCUMFERENCE * (1 - c);
+  chargeRing.classList.toggle('full', c >= 1);
+}
+
+function updateAmmo() {
+  const reloading = weapon.reloading > 0;
+  ammoCount.textContent = reloading ? '--' : weapon.ammo;
+  ammoBox.classList.toggle('reloading', reloading);
+  ammoBox.classList.toggle('low', !reloading && weapon.ammo <= 3);
+  // Mid-reload the pips fill back up in order, so the bar reads as the magazine.
+  const filled = reloading ? Math.round(weapon.reloadProgress * weapon.magSize) : weapon.ammo;
+  for (let i = 0; i < pips.length; i++) pips[i].classList.toggle('spent', i >= filled);
 }
 
 let last = performance.now();
@@ -141,11 +168,15 @@ function frame(now) {
   if (mouse.x || mouse.y) player.look(mouse.x, mouse.y);
 
   if (input.consumeTap('KeyV')) thirdPerson = !thirdPerson;
-  if (input.consumeTap('KeyR')) {
+  if (input.consumeTap('Backspace')) {
     player.respawn();
     world.resetCrates();
     for (const t of world.targets) t.reset();
+    weapon.ammo = weapon.magSize;
   }
+
+  // Aiming slows the player down, so the weapon's aim weight drives movement too.
+  player.aiming = weapon.ads;
 
   accumulator += dt;
   let steps = 0;
@@ -176,6 +207,7 @@ function frame(now) {
   hudView.textContent = thirdPerson ? 'third' : 'first';
   hudHits.textContent = weapon.shotsLanded;
   updateCrosshair();
+  updateAmmo();
   input.endFrame();
 }
 

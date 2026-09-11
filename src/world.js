@@ -29,10 +29,11 @@ function gridTexture() {
 export function buildWorld(scene) {
   const statics = [];
   const crates = [];
-  const world = { statics, crates, spawn: new THREE.Vector3(0, 1.5, 24) };
+  const SKY = 0x1b2836;
+  const world = { statics, crates, targets: [], sky: SKY, spawn: new THREE.Vector3(0, 1.5, 24) };
 
-  scene.background = new THREE.Color(0x1b2836);
-  scene.fog = new THREE.Fog(0x1b2836, 70, 165);
+  scene.background = new THREE.Color(SKY);
+  scene.fog = new THREE.Fog(SKY, 70, 165);
 
   scene.add(new THREE.HemisphereLight(0xa8ccff, 0x4a5158, 1.6));
   const sun = new THREE.DirectionalLight(0xffeeda, 2.6);

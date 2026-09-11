@@ -3,6 +3,9 @@ import { Input } from './input.js';
 import { buildWorld } from './world.js';
 import { Player, TUNING } from './player.js';
 import { stepCrate, castRay } from './physics.js';
+import { createTargets } from './targets.js';
+import { Effects } from './effects.js';
+import { Weapon } from './weapon.js';
 
 const STEP = 1 / 120;        // fixed physics tick
 const MAX_STEPS = 8;
@@ -12,6 +15,9 @@ const canvas = document.getElementById('game');
 const overlay = document.getElementById('overlay');
 const hudSpeed = document.getElementById('speed');
 const hudView = document.getElementById('view');
+const hudHits = document.getElementById('hits');
+const crosshair = document.getElementById('crosshair');
+const hitmarker = document.getElementById('hitmarker');
 
 const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, powerPreference: 'high-performance' });
 renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
@@ -19,14 +25,30 @@ renderer.shadowMap.enabled = true;
 renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
 renderer.toneMappingExposure = 1.15;
+renderer.autoClear = false;  // the first-person viewmodel is drawn as a second pass
 
 const scene = new THREE.Scene();
 const camera = new THREE.PerspectiveCamera(75, 1, 0.05, 400);
 camera.rotation.order = 'YXZ';
 
 const world = buildWorld(scene);
+renderer.setClearColor(world.sky);
+
+// The viewmodel lives in its own scene, seen by a camera parked at the origin, so it
+// can never clip into the level and keeps a tighter field of view than the world.
+const viewScene = new THREE.Scene();
+const viewCamera = new THREE.PerspectiveCamera(66, 1, 0.01, 6);
+viewScene.add(new THREE.HemisphereLight(0xc4dbff, 0x2a3138, 2.0));
+const viewKey = new THREE.DirectionalLight(0xfff1dd, 2.4);
+viewKey.position.set(-0.7, 1, 0.75);
+viewScene.add(viewKey);
+
 const input = new Input(canvas, overlay);
 const player = new Player(world, scene);
+const effects = new Effects(scene);
+
+world.targets = createTargets(scene, world.spawn);
+const weapon = new Weapon({ scene, viewScene, world, effects, character: player.character });
 
 let thirdPerson = false;
 let boom = 5.2;              // smoothed third-person camera distance
@@ -35,12 +57,15 @@ const head = new THREE.Vector3();
 const camTarget = new THREE.Vector3();
 const lookDir = new THREE.Vector3();
 const boomDir = new THREE.Vector3();
+let camRoll = 0;
 
 function resize() {
   const w = innerWidth, h = innerHeight;
   renderer.setSize(w, h, false);
   camera.aspect = w / h;
   camera.updateProjectionMatrix();
+  viewCamera.aspect = w / h;
+  viewCamera.updateProjectionMatrix();
 }
 addEventListener('resize', resize);
 resize();
@@ -55,11 +80,22 @@ function fixedStep(dt) {
 
 function updateCamera(dt, playerPos) {
   const T = TUNING;
-  const targetView = player.sliding ? T.slideEyeHeight : T.eyeHeight;
-  player.viewHeight += (targetView - player.viewHeight) * (1 - Math.exp(-16 * dt));
+  player.viewHeight += (player.eyeTarget - player.viewHeight) * (1 - Math.exp(-16 * dt));
 
   head.set(playerPos.x, playerPos.y - player.half.y + player.viewHeight, playerPos.z);
-  camera.rotation.set(player.pitch, player.yaw, 0);
+
+  // Bank the view with a slide, and lurch through the landing flip without putting
+  // the player through a full 360 in first person.
+  const flip = player.rolling ? Math.sin(player.rollT * Math.PI) : 0;
+  const wantRoll = (player.sliding || player.diving ? -player.slideLean * 0.13 : 0)
+                 - player.strafe * 0.018 + flip * 0.22 * player.slideLean;
+  camRoll += (wantRoll - camRoll) * (1 - Math.exp(-9 * dt));
+
+  camera.rotation.set(
+    player.pitch + weapon.recoilPitch - flip * 0.35,
+    player.yaw + weapon.recoilYaw,
+    camRoll,
+  );
 
   if (!thirdPerson) {
     camera.position.copy(head);
@@ -77,9 +113,20 @@ function updateCamera(dt, playerPos) {
   }
 
   const over = THREE.MathUtils.clamp((player.speed - T.walkSpeed) / (T.slideMaxSpeed - T.walkSpeed), 0, 1);
-  const targetFov = 75 + over * 10;
-  camera.fov += (targetFov - camera.fov) * (1 - Math.exp(-8 * dt));
+  const targetFov = (75 + over * 10 + weapon.boost * 7) * (1 - weapon.ads * 0.22);
+  camera.fov += (targetFov - camera.fov) * (1 - Math.exp(-9 * dt));
   camera.updateProjectionMatrix();
+}
+
+// The crosshair opens up with the gun's spread, so it always shows real accuracy, and
+// greys out while the shot is still on cooldown.
+function updateCrosshair() {
+  const px = Math.tan(weapon.baseSpread) / Math.tan(THREE.MathUtils.degToRad(camera.fov) / 2) * (innerHeight / 2);
+  crosshair.style.setProperty('--gap', `${Math.max(3, px).toFixed(1)}px`);
+  crosshair.classList.toggle('on-target', weapon.onTarget && !thirdPerson);
+  crosshair.classList.toggle('cooling', weapon.cooldown > 0);
+  hitmarker.style.opacity = weapon.hitFlash;
+  hitmarker.style.transform = `translate(-50%, -50%) scale(${1.35 - weapon.hitFlash * 0.3})`;
 }
 
 let last = performance.now();
@@ -94,7 +141,11 @@ function frame(now) {
   if (mouse.x || mouse.y) player.look(mouse.x, mouse.y);
 
   if (input.consumeTap('KeyV')) thirdPerson = !thirdPerson;
-  if (input.consumeTap('KeyR')) { player.respawn(); world.resetCrates(); }
+  if (input.consumeTap('KeyR')) {
+    player.respawn();
+    world.resetCrates();
+    for (const t of world.targets) t.reset();
+  }
 
   accumulator += dt;
   let steps = 0;
@@ -106,14 +157,25 @@ function frame(now) {
   if (steps === MAX_STEPS) accumulator = 0;
 
   const alpha = accumulator / STEP;
-  const playerPos = player.render(alpha, thirdPerson);
+  const playerPos = player.render(dt, alpha, thirdPerson, weapon);
   for (const crate of world.crates) crate.mesh.position.lerpVectors(crate.prev, crate.pos, alpha);
+  for (const target of world.targets) target.update(dt);
 
   updateCamera(dt, playerPos);
+  weapon.update(dt, { input, player, camera, eye: head, thirdPerson, mouseDelta: mouse });
+  effects.update(dt);
+
+  renderer.clear();
   renderer.render(scene, camera);
+  if (!thirdPerson) {
+    renderer.clearDepth();
+    renderer.render(viewScene, viewCamera);
+  }
 
   hudSpeed.textContent = player.speed.toFixed(1);
   hudView.textContent = thirdPerson ? 'third' : 'first';
+  hudHits.textContent = weapon.shotsLanded;
+  updateCrosshair();
   input.endFrame();
 }
 

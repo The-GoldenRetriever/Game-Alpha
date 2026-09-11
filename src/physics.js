@@ -98,10 +98,14 @@ export function stepCrate(crate, dt, world, gravity) {
   if (Math.abs(crate.vel.z) < 0.01) crate.vel.z = 0;
 }
 
-// Slab test, used to keep the third-person camera out of walls.
-function rayBox(origin, dir, b, maxDist) {
-  let tmin = 0, tmax = maxDist;
-  for (const a of ['x', 'y', 'z']) {
+// Slab test, used to keep the third-person camera out of walls and to trace shots.
+// `out`, when given, receives the axis index and sign of the face that was entered.
+const AXES = ['x', 'y', 'z'];
+
+export function rayBox(origin, dir, b, maxDist, out) {
+  let tmin = 0, tmax = maxDist, axis = -1, sign = 0;
+  for (let i = 0; i < 3; i++) {
+    const a = AXES[i];
     const d = dir[a];
     if (Math.abs(d) < 1e-8) {
       if (origin[a] < lo(b, a) || origin[a] > hi(b, a)) return null;
@@ -109,11 +113,13 @@ function rayBox(origin, dir, b, maxDist) {
     }
     let t1 = (lo(b, a) - origin[a]) / d;
     let t2 = (hi(b, a) - origin[a]) / d;
-    if (t1 > t2) { const t = t1; t1 = t2; t2 = t; }
-    if (t1 > tmin) tmin = t1;
+    let s = -1;
+    if (t1 > t2) { const t = t1; t1 = t2; t2 = t; s = 1; }
+    if (t1 > tmin) { tmin = t1; axis = i; sign = s; }
     if (t2 < tmax) tmax = t2;
     if (tmin > tmax) return null;
   }
+  if (out) { out.axis = axis; out.sign = sign; }
   return tmin;
 }
 
@@ -128,4 +134,49 @@ export function castRay(origin, dir, maxDist, world) {
     if (t !== null && t < nearest) nearest = t;
   }
   return nearest;
+}
+
+const FACE = { axis: -1, sign: 0 };
+const HIT = {
+  dist: 0,
+  point: new THREE.Vector3(),
+  normal: new THREE.Vector3(),
+  object: null,
+  kind: 'none',   // 'world' | 'crate' | 'target' | 'none'
+};
+
+function record(t, face, object, kind) {
+  HIT.dist = t;
+  HIT.object = object;
+  HIT.kind = kind;
+  HIT.normal.set(0, 0, 0);
+  if (face.axis >= 0) HIT.normal[AXES[face.axis]] = face.sign;
+}
+
+// Single hitscan trace against the level, the crates and the pop-up targets.
+// Always returns the shared HIT record — read it before the next call.
+export function traceShot(origin, dir, maxDist, world) {
+  HIT.dist = maxDist;
+  HIT.object = null;
+  HIT.kind = 'none';
+  HIT.normal.set(0, 0, 0);
+
+  for (const s of world.statics) {
+    const t = rayBox(origin, dir, s, HIT.dist, FACE);
+    if (t !== null && t < HIT.dist) record(t, FACE, s, 'world');
+  }
+  for (const c of world.crates) {
+    const t = rayBox(origin, dir, c, HIT.dist, FACE);
+    if (t !== null && t < HIT.dist) record(t, FACE, c, 'crate');
+  }
+  for (const target of world.targets || []) {
+    const t = target.raycast(origin, dir, HIT.dist, FACE);
+    if (t !== null && t < HIT.dist) {
+      record(t, FACE, target, 'target');
+      target.faceNormal(HIT.normal);
+    }
+  }
+
+  HIT.point.copy(origin).addScaledVector(dir, HIT.dist);
+  return HIT;
 }
